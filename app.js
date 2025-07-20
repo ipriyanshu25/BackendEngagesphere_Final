@@ -11,7 +11,9 @@ const app = express();
 // ✅ Environment Variables
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI;
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+// const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'https://engage-sphere-new-frontend.vercel.app/';
+
 
 // ✅ Ensure Mongo URI exists
 if (!MONGO_URI) {
