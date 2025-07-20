@@ -23,7 +23,7 @@ if (!MONGO_URI) {
 
 // ✅ Middleware
 app.use(cors({
-  origin: FRONTEND_ORIGIN,
+  origin: process.env.FRONTEND_ORIGIN || 'https://engage-sphere-new-frontend.vercel.app/',
   credentials: true, // Allow cookies/auth headers
 }));
 app.use(express.json());
