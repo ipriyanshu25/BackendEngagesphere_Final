@@ -1,289 +1,141 @@
-
-
-
-
 require('dotenv').config();
-const axios = require('axios');
-const Payment = require('../model/payment');
-const User = require('../model/user');
+const Razorpay   = require('razorpay');
+const crypto     = require('crypto');
+const Payment    = require('../model/payment');
+const User       = require('../model/user');
+const Plan       = require('../model/plan');
 
-const PAYPAL_API =
-  process.env.NODE_ENV === 'production'
-    ? 'https://api-m.paypal.com'
-    : 'https://api-m.sandbox.paypal.com';
+// initialize Razorpay client
+const razorpay = new Razorpay({
+  key_id:    process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
 
-const getCredentials = () => {
-  const clientId = process.env.PAYPAL_CLIENT_ID;
-  const secret = process.env.PAYPAL_CLIENT_SECRET;
-  return { id: clientId, secret };
-};
-
-const getAccessToken = async () => {
-  const { id, secret } = getCredentials();
-  const creds = Buffer.from(`${id}:${secret}`, 'utf8').toString('base64');
-  const { data } = await axios.post(
-    `${PAYPAL_API}/v1/oauth2/token`,
-    'grant_type=client_credentials',
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
-  return data.access_token;
-};
-
-/** Create PayPal order and save initial Payment, returning approval link */
+/**
+ * Create a new Razorpay order and persist it in the Payment collection,
+ * storing only userId and planId.
+ */
 exports.createOrder = async (req, res) => {
-  const { amount, packageName, packageFeatures = [], userId } = req.body;
   try {
-    const user = await User.findOne({ userId });
-    if (!user) return res.status(400).json({ error: 'Invalid userId' });
-    const userName = user.name || user.username;
+    const { userId, planId, pricingId, currency = 'USD', receipt } = req.body;
 
-    const accessToken = await getAccessToken();
-    const { data: order } = await axios.post(
-      `${PAYPAL_API}/v2/checkout/orders`,
-      {
-        intent: 'CAPTURE',
-        purchase_units: [
-          {
-            amount: { currency_code: 'USD', value: amount },
-            description: `${packageName} – EngageSphere Package`,
-            custom_id: `pkg_${Date.now()}`,
-          },
-        ],
-        application_context: {
-          brand_name: 'EngageSphere',
-          user_action: 'PAY_NOW',
-          return_url:
-            process.env.NODE_ENV === 'production'
-              ? 'https://yourdomain.com/success'
-              : 'http://localhost:3000/success',
-          cancel_url:
-            process.env.NODE_ENV === 'production'
-              ? 'https://yourdomain.com/cancel'
-              : 'http://localhost:3000/cancel',
-        },
-      },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
-    );
-
-    // Extract approval link for frontend redirection
-    const approveLink = order.links.find((l) => l.rel === 'approve')?.href || '';
-
-    const payment = await Payment.create({
-      orderId: order.id,
-      userId,
-      userName,
-      status: 'CREATED',
-      packageName,
-      packageFeatures,
-      amount: parseFloat(amount),
-      currency: 'USD',
-      create_time: new Date(),
-    });
-
-    res.status(200).json({ payment, approveLink });
-  } catch (err) {
-    console.error('PayPal createOrder error:', err);
-    res.status(500).json({ error: 'Order creation failed' });
-  }
-};
-
-/** Capture PayPal order, fetch PayPal transaction and update Payment */
-exports.captureOrder = async (req, res) => {
-  const orderId = req.body.orderID || req.body.orderId;
-  if (!orderId) return res.status(400).json({ error: 'orderId (or orderID) is required' });
-  try {
-    const accessToken = await getAccessToken();
-    const { data: captureRes } = await axios.post(
-      `${PAYPAL_API}/v2/checkout/orders/${orderId}/capture`,
-      {},
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
-    );
-
-    const payer = captureRes.payer;
-    const txn = captureRes.purchase_units[0].payments.captures[0];
-
-    const payment = await Payment.findOneAndUpdate(
-      { orderId: captureRes.id },
-      {
-        transactionId: txn.id,
-        status: txn.status,
-        payerEmail: payer.email_address,
-        payerName: `${payer.name.given_name} ${payer.name.surname}`,
-        create_time: txn.create_time,
-      },
-      { new: true }
-    );
-
-    res.status(200).json({ message: 'Payment captured & updated', payment });
-  } catch (err) {
-    if (err.response && err.response.status === 422) {
-      console.error('PayPal capture validation error:', err.response.data);
+    // 1. Validate required fields
+    if (!userId || !planId || !pricingId) {
       return res.status(400).json({
-        error: 'Order cannot be captured. Ensure it is approved by the buyer.',
-        details: err.response.data,
+        success: false,
+        message: 'Missing required fields: userId, planId, pricingId'
       });
     }
-    console.error('PayPal captureOrder error:', err);
-    res.status(500).json({ error: 'Payment capture failed' });
-  }
-};
 
-/** Get payment by paymentId */
-exports.getPaymentDetails = async (req, res) => {
-  const { paymentId } = req.body;
-  try {
-    const payment = await Payment.findOne({ paymentId });
-    if (!payment) return res.status(404).json({ message: 'Payment not found' });
-    res.status(200).json({ payment });
-  } catch (err) {
-    console.error('PayPal getPaymentDetails error:', err);
-    res.status(500).json({ error: 'Could not retrieve payment details' });
-  }
-};
+    // 2. Verify user exists
+    const user = await User.findOne({ userId });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
 
-// ✅ NEW: Admin route to get all payments for dashboard
-exports.getAllPayments = async (req, res) => {
-  try {
-    const payments = await Payment.find()
-      .sort({ createdAt: -1 }) // Sort by newest first
-      .lean(); // Use lean() for better performance
+    // 3. Verify plan exists
+    const plan = await Plan.findOne({ planId });
+    if (!plan) {
+      return res.status(404).json({ success: false, message: 'Plan not found' });
+    }
 
-    res.status(200).json({ 
-      success: true, 
-      data: payments,
-      total: payments.length 
-    });
-  } catch (err) {
-    console.error('Error fetching all payments:', err);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch payments' 
-    });
-  }
-};
+    // 4. Locate the pricing tier
+    const tier = plan.pricing.find(p => p.pricingId === pricingId);
+    if (!tier) {
+      return res.status(404).json({
+        success: false,
+        message: `Pricing option ${pricingId} not found for plan ${planId}`
+      });
+    }
 
-// ✅ NEW: Admin route to get payment statistics
-exports.getPaymentStats = async (req, res) => {
-  try {
-    const stats = await Payment.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalPayments: { $sum: 1 },
-          totalAmount: { $sum: '$amount' },
-          capturedPayments: {
-            $sum: { $cond: [{ $eq: ['$status', 'CAPTURED'] }, 1, 0] }
-          },
-          capturedAmount: {
-            $sum: { $cond: [{ $eq: ['$status', 'CAPTURED'] }, '$amount', 0] }
-          },
-          createdPayments: {
-            $sum: { $cond: [{ $eq: ['$status', 'CREATED'] }, 1, 0] }
-          },
-          failedPayments: {
-            $sum: { $cond: [{ $eq: ['$status', 'FAILED'] }, 1, 0] }
-          }
-        }
-      }
-    ]);
+    // 5. Convert "$24.99" → 2499 (cents)
+    const amountCents = Math.round(parseFloat(tier.price.replace(/[^0-9.-]+/g,"")) * 100);
 
-    const result = stats.length > 0 ? stats[0] : {
-      totalPayments: 0,
-      totalAmount: 0,
-      capturedPayments: 0,
-      capturedAmount: 0,
-      createdPayments: 0,
-      failedPayments: 0
+    // 6. Create Razorpay order
+    const options = {
+      amount:  amountCents,
+      currency,
+      receipt: receipt || crypto.randomBytes(10).toString('hex'),
     };
+    const order = await razorpay.orders.create(options);
 
-    res.status(200).json({ 
-      success: true, 
-      data: result 
+    // 7. Persist minimal record
+    await Payment.create({
+      orderId:   order.id,
+      amount:    order.amount,
+      currency:  order.currency,
+      receipt:   order.receipt,
+      userId,
+      planId,
+      pricingId,           // track which tier was chosen
+      status:    'created',
+      createdAt: new Date(),
     });
-  } catch (err) {
-    console.error('Error fetching payment stats:', err);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch payment statistics' 
-    });
+
+    return res.status(201).json({ success: true, order });
+  } catch (error) {
+    console.error('Error in createOrder:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ✅ NEW: Admin route to get payments by user ID
-exports.getPaymentsByUser = async (req, res) => {
-  const { userId } = req.params;
-  try {
-    const payments = await Payment.find({ userId })
-      .sort({ createdAt: -1 })
-      .lean();
 
-    res.status(200).json({ 
-      success: true, 
-      data: payments,
-      total: payments.length 
-    });
-  } catch (err) {
-    console.error('Error fetching payments by user:', err);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch user payments' 
-    });
-  }
-};
-
-// ✅ NEW: Update payment status (for admin actions)
-exports.updatePaymentStatus = async (req, res) => {
-  const { paymentId, status } = req.body;
+/**
+ * Verify Razorpay signature, update status to 'paid',
+ * and return success/failure.
+ */
+exports.verifyPayment = async (req, res) => {
   try {
-    const payment = await Payment.findOneAndUpdate(
-      { paymentId },
-      { status },
-      { new: true }
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+
+    // Validate signature
+    const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+                       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+                       .digest('hex');
+    if (hmac !== razorpay_signature) {
+      await Payment.findOneAndUpdate(
+        { orderId: razorpay_order_id },
+        { status: 'failed' }
+      );
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid signature'
+      });
+    }
+
+    // Fetch payment status from Razorpay
+    const razorPayment = await razorpay.payments.fetch(razorpay_payment_id);
+    if (razorPayment.status !== 'captured') {
+      await Payment.findOneAndUpdate(
+        { orderId: razorpay_order_id },
+        { status: razorPayment.status }
+      );
+      return res.status(400).json({
+        success: false,
+        message: `Payment status: ${razorPayment.status}`
+      });
+    }
+
+    // Update record as paid
+    await Payment.findOneAndUpdate(
+      { orderId: razorpay_order_id },
+      {
+        paymentId: razorpay_payment_id,
+        signature: razorpay_signature,
+        status:    'paid',
+        paidAt:    new Date(),
+      }
     );
 
-    if (!payment) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Payment not found' 
-      });
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      message: 'Payment status updated successfully',
-      data: payment 
+    return res.json({
+      success: true,
+      message: 'Payment verified successfully'
     });
-  } catch (err) {
-    console.error('Error updating payment status:', err);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to update payment status' 
-    });
-  }
-};
-
-// ✅ NEW: Delete payment (for admin cleanup)
-exports.deletePayment = async (req, res) => {
-  const { paymentId } = req.params;
-  try {
-    const payment = await Payment.findOneAndDelete({ paymentId });
-    
-    if (!payment) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Payment not found' 
-      });
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      message: 'Payment deleted successfully' 
-    });
-  } catch (err) {
-    console.error('Error deleting payment:', err);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to delete payment' 
+  } catch (error) {
+    console.error('Error in verifyPayment:', error);
+    return res.status(500).json({
+      success: false,
+      message:  error.message
     });
   }
 };

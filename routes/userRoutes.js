@@ -6,7 +6,7 @@ const adminOnly = require('../middleware/adminOnly');
 // Public routes
 router.post('/register', uc.register); 
 router.post('/login', uc.login); 
-router.post('/profile', uc.profile);  
+router.post('/getById', uc.getById);  
 
 // ✅ New: simplified GET /user/all
 router.get('/all', uc.verifyToken, adminOnly, uc.getAllUsersSimple);

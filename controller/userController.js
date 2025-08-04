@@ -44,7 +44,7 @@ exports.login = async (req, res) => {
     const token = jwt.sign(
       { userId: user.userId },
       JWT_SECRET,
-      { expiresIn: '1d' }
+      { expiresIn: '100d' }
     );
 
     return res.status(200).json({
@@ -77,23 +77,6 @@ exports.verifyToken = (req, res, next) => {
   });
 };
 
-/**
- * Fetch current user
- * POST /user/profile
- */
-exports.profile = async (req, res) => {
-  try {
-    const { userId } = req.body;
-    const user = await User.findOne({ userId }).select('-password -_id -__v');
-    if (!user)
-      return res.status(404).json({ message: 'User not found' });
-
-    return res.status(200).json(user.toObject());
-  } catch (err) {
-    console.error('Profile fetch error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
 
 /**
  * Get paginated users with search/sort (optional)
@@ -199,6 +182,29 @@ exports.updateProfile = async (req, res) => {
     return res.status(200).json({ message: 'Profile updated', user: safeUser });
   } catch (err) {
     console.error('UpdateProfile error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+exports.getById = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
+
+    // find the user, omit password and __v
+    const user = await User.findOne({ userId })
+      .select('-password -__v');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    return res.status(200).json({ data: user });
+  } catch (err) {
+    console.error('Get user by ID error:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };

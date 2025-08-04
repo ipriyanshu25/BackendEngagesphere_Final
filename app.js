@@ -18,14 +18,12 @@ const service = require('./routes/servicesRoutes')
 const app = express();
 
 app.use(cors({
-  // origin: process.env.FRONTEND_ORIGIN || 'http://localhost:3000',
-  origin: process.env.FRONTEND_ORIGIN || 'https://engage-sphere-new-frontend.vercel.app',
+  origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
+  // origin: process.env.FRONTEND_ORIGIN || 'https://engage-sphere-new-frontend.vercel.app',
   credentials: true
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-
 
 // ✅ Mount Routes
 app.use('/user', userRoutes);         // Auth, profile, getAll (admin protected)
